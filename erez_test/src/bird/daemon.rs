@@ -162,7 +162,7 @@ struct ProtocolEntry {
 fn parse_protocols(s: &str) -> anyhow::Result<Vec<ProtocolEntry>> {
     let mut lines = s.lines();
 
-    // Header line anchors column positions
+    // Header line anchors column positions.
     let header = lines
         .find(|l| l.starts_with("Name"))
         .ok_or_else(|| anyhow::anyhow!("Missing header in protocols output"))?;
@@ -247,6 +247,7 @@ mod tests {
     use crate::{
         assert_eventually,
         bird::config::Peer,
+        netlink::Netlink,
         topology::{VethPair, VethPlacement},
     };
 
@@ -301,10 +302,9 @@ mod tests {
 
         // Assign addresses to A's loopback.
         a.ns.spawn(async move {
-            let nl = crate::netlink::Netlink::connect()?;
-            let lo_idx = nl.link_get_index("lo").await?;
-            nl.addr_add(lo_idx, prefix_v4).await?;
-            nl.addr_add(lo_idx, prefix_v6).await?;
+            let nl = Netlink::connect()?;
+            nl.addr_add("lo", prefix_v4).await?;
+            nl.addr_add("lo", prefix_v6).await?;
             Ok::<_, anyhow::Error>(())
         })
         .await

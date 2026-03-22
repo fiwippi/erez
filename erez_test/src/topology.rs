@@ -35,22 +35,22 @@ impl Bridge {
             let id: u16 = rand::rng().random();
             format!("br{id:04x}")
         };
-        let address = ns
+        let addr = ns
             .spawn({
                 let name = device.clone();
                 async move {
                     let nl = Netlink::connect()?;
-                    let idx = nl.bridge_create(&name).await?;
-                    nl.link_set_up(idx).await?;
-                    let address = nl.link_get_link_local(&name).await?;
-                    Ok::<_, anyhow::Error>(address)
+                    nl.bridge_create(&name).await?;
+                    nl.link_set_up(&name).await?;
+                    let addr = nl.link_get_link_local(&name).await?;
+                    Ok::<_, anyhow::Error>(addr)
                 }
             })
             .await??;
         Ok(Bridge {
             ns,
             name: device,
-            link_local: address,
+            link_local: addr,
         })
     }
 }
@@ -130,13 +130,13 @@ impl VethPair {
         };
 
         let nl = Netlink::connect()?;
-        let (device_idx, peer_idx) = nl.veth_create_pair(&device_name, &peer_name).await?;
+        nl.veth_create_pair(&device_name, &peer_name).await?;
 
         // We need to bring both ends up before link-local addresses
         // are assigned to each end. Then we can query for these
         // addresses.
-        VethPair::setup_end(&nl, &device, device_idx, device_name.to_string()).await?;
-        VethPair::setup_end(&nl, &peer, peer_idx, peer_name.to_string()).await?;
+        VethPair::setup_end(&nl, &device, device_name.to_string()).await?;
+        VethPair::setup_end(&nl, &peer, peer_name.to_string()).await?;
 
         let query_ll = |ns: &Ns, name: String| {
             ns.spawn(async move {
@@ -144,16 +144,16 @@ impl VethPair {
                 nl.link_get_link_local(&name).await
             })
         };
-        let device_address = query_ll(device.ns(), device_name.clone()).await??;
-        let peer_address = query_ll(peer.ns(), peer_name.clone()).await??;
+        let device_addr = query_ll(device.ns(), device_name.clone()).await??;
+        let peer_addr = query_ll(peer.ns(), peer_name.clone()).await??;
 
         let (device_ll, device_name) = match &device {
             VethPlacement::BridgePort(b) => (b.link_local, b.name.clone()),
-            _ => (device_address, device_name),
+            _ => (device_addr, device_name),
         };
         let (peer_ll, peer_name) = match &peer {
             VethPlacement::BridgePort(b) => (b.link_local, b.name.clone()),
-            _ => (peer_address, peer_name),
+            _ => (peer_addr, peer_name),
         };
 
         Ok(VethPair {
@@ -186,20 +186,15 @@ impl VethPair {
         }
     }
 
-    async fn setup_end(
-        nl: &Netlink,
-        end: &VethPlacement,
-        veth_idx: u32,
-        veth_name: String,
-    ) -> anyhow::Result<()> {
+    async fn setup_end(nl: &Netlink, end: &VethPlacement, veth_name: String) -> anyhow::Result<()> {
         let ns = end.ns();
 
         // Move the veth into the target namespace.
-        nl.veth_set_ns(veth_idx, ns.pid()).await?;
+        nl.veth_set_ns(&veth_name, ns.pid()).await?;
 
         // Configure the veth end inside the target namespace.
         ns.spawn({
-            let address = match end {
+            let addr = match end {
                 VethPlacement::Addr(_, addr) => Some(*addr),
                 VethPlacement::Bare(_) | VethPlacement::BridgePort(_) => None,
             };
@@ -209,15 +204,13 @@ impl VethPair {
             };
             async move {
                 let nl = Netlink::connect()?;
-                let link_idx = nl.link_get_index(&veth_name).await?;
-                if let Some(address) = address {
-                    nl.addr_add(link_idx, address).await?;
+                if let Some(addr) = addr {
+                    nl.addr_add(&veth_name, addr).await?;
                 }
                 if let Some(br_name) = br_name {
-                    let bridge_idx = nl.link_get_index(&br_name).await?;
-                    nl.bridge_add_port(bridge_idx, link_idx).await?;
+                    nl.bridge_add_port(&br_name, &veth_name).await?;
                 }
-                nl.link_set_up(link_idx).await?;
+                nl.link_set_up(&veth_name).await?;
                 Ok::<_, anyhow::Error>(())
             }
         })
@@ -386,9 +379,8 @@ impl Router<Edge> {
         };
         ns.spawn(async move {
             let nl = Netlink::connect()?;
-            let lo_idx = nl.link_get_index("lo").await?;
-            nl.addr_add(lo_idx, sitelocal_v4).await?;
-            nl.addr_add(lo_idx, sitelocal_v6).await?;
+            nl.addr_add("lo", sitelocal_v4).await?;
+            nl.addr_add("lo", sitelocal_v6).await?;
             Ok::<_, anyhow::Error>(())
         })
         .await??;
@@ -396,11 +388,11 @@ impl Router<Edge> {
         // Set default routes on the metal to point to the router's bridge.
         ns.spawn({
             let device_name = link.device.name.clone();
-            let bridge_address = interface.bridge.link_local;
+            let bridge_addr = interface.bridge.link_local;
             async move {
                 let nl = Netlink::connect()?;
                 nl.route_add_default_via_v6(
-                    bridge_address,
+                    bridge_addr,
                     &device_name,
                     sitelocal_v4.addr(),
                     sitelocal_v6.addr(),

@@ -18,21 +18,23 @@ impl Netlink {
         Ok(Self { handle })
     }
 
-    pub async fn addr_add(&self, index: u32, cidr: impl Into<IpNet>) -> anyhow::Result<()> {
+    pub async fn addr_add(&self, name: &str, cidr: impl Into<IpNet>) -> anyhow::Result<()> {
         let cidr = cidr.into();
+        let idx = self.link_get_index(name).await?;
         self.handle
             .address()
-            .add(index, cidr.addr(), cidr.prefix_len())
+            .add(idx, cidr.addr(), cidr.prefix_len())
             .execute()
             .await?;
         Ok(())
     }
 
-    pub async fn bridge_add_port(&self, bridge_idx: u32, port_idx: u32) -> anyhow::Result<()> {
+    pub async fn bridge_add_port(&self, bridge_name: &str, port_name: &str) -> anyhow::Result<()> {
+        let bridge_idx = self.link_get_index(bridge_name).await?;
         self.handle
             .link()
             .change(
-                LinkUnspec::new_with_index(port_idx)
+                LinkUnspec::new_with_name(port_name)
                     .controller(bridge_idx)
                     .build(),
             )
@@ -41,17 +43,16 @@ impl Netlink {
         Ok(())
     }
 
-    pub async fn bridge_create(&self, name: &str) -> anyhow::Result<u32> {
+    pub async fn bridge_create(&self, name: &str) -> anyhow::Result<()> {
         self.handle
             .link()
             .add(LinkBridge::new(name).build())
             .execute()
             .await?;
-        let idx = self.link_get_index(name).await?;
-        Ok(idx)
+        Ok(())
     }
 
-    pub async fn link_get_index(&self, name: &str) -> anyhow::Result<u32> {
+    async fn link_get_index(&self, name: &str) -> anyhow::Result<u32> {
         let mut links = self
             .handle
             .link()
@@ -86,10 +87,10 @@ impl Netlink {
         Err(anyhow::anyhow!("No link-local address found on {name}"))
     }
 
-    pub async fn link_set_up(&self, index: u32) -> anyhow::Result<()> {
+    pub async fn link_set_up(&self, name: &str) -> anyhow::Result<()> {
         self.handle
             .link()
-            .change(LinkUnspec::new_with_index(index).up().build())
+            .change(LinkUnspec::new_with_name(name).up().build())
             .execute()
             .await?;
         Ok(())
@@ -98,11 +99,11 @@ impl Netlink {
     pub async fn route_add_default_via_v6(
         &self,
         gateway: Ipv6Addr,
-        dev: &str,
+        device: &str,
         src_v4: impl Into<Option<Ipv4Addr>>,
         src_v6: impl Into<Option<Ipv6Addr>>,
     ) -> anyhow::Result<()> {
-        let dev_idx = self.link_get_index(dev).await?;
+        let dev_idx = self.link_get_index(device).await?;
 
         if let Some(src) = src_v6.into() {
             let route = RouteMessageBuilder::<Ipv6Addr>::new()
@@ -127,29 +128,20 @@ impl Netlink {
         Ok(())
     }
 
-    pub async fn veth_create_pair(
-        &self,
-        device_name: &str,
-        peer_name: &str,
-    ) -> anyhow::Result<(u32, u32)> {
+    pub async fn veth_create_pair(&self, device_name: &str, peer_name: &str) -> anyhow::Result<()> {
         self.handle
             .link()
             .add(LinkVeth::new(device_name, peer_name).build())
             .execute()
             .await?;
-
-        let (device_idx, peer_idx) = tokio::try_join!(
-            self.link_get_index(device_name),
-            self.link_get_index(peer_name),
-        )?;
-        Ok((device_idx, peer_idx))
+        Ok(())
     }
 
-    pub async fn veth_set_ns(&self, index: u32, ns_pid: Pid) -> anyhow::Result<()> {
+    pub async fn veth_set_ns(&self, name: &str, ns_pid: Pid) -> anyhow::Result<()> {
         self.handle
             .link()
             .change(
-                LinkUnspec::new_with_index(index)
+                LinkUnspec::new_with_name(name)
                     .setns_by_pid(ns_pid.as_raw() as u32)
                     .build(),
             )
@@ -169,8 +161,8 @@ mod tests {
         let ns = Ns::net("test").await.unwrap();
         ns.spawn(async {
             let nl = Netlink::connect().unwrap();
-            let (idx, _) = nl.veth_create_pair("a", "b").await.unwrap();
-            nl.addr_add(idx, "10.0.0.1/24".parse::<IpNet>().unwrap())
+            nl.veth_create_pair("a", "b").await.unwrap();
+            nl.addr_add("a", "10.0.0.1/24".parse::<IpNet>().unwrap())
                 .await
         })
         .await
@@ -183,9 +175,9 @@ mod tests {
         let ns = Ns::net("test").await.unwrap();
         ns.spawn(async {
             let nl = Netlink::connect().unwrap();
-            let br_idx = nl.bridge_create("br0").await.unwrap();
-            let (idx_device, _) = nl.veth_create_pair("a", "b").await.unwrap();
-            nl.bridge_add_port(br_idx, idx_device).await
+            nl.bridge_create("br0").await.unwrap();
+            nl.veth_create_pair("a", "b").await.unwrap();
+            nl.bridge_add_port("br0", "a").await
         })
         .await
         .unwrap()
@@ -204,21 +196,6 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_err(), "duplicate bridge creation should fail");
-    }
-
-    #[tokio::test]
-    async fn bridge_create_index_matches_lookup() {
-        let ns = Ns::net("test").await.unwrap();
-        ns.spawn(async {
-            let nl = Netlink::connect().unwrap();
-            let idx = nl.bridge_create("br0").await.unwrap();
-            let lookup = nl.link_get_index("br0").await.unwrap();
-            assert_eq!(idx, lookup, "bridge index must match lookup");
-            Ok::<_, anyhow::Error>(())
-        })
-        .await
-        .unwrap()
-        .unwrap();
     }
 
     #[tokio::test]
@@ -270,29 +247,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn veth_create_pair_indices_match_lookup() {
-        let ns = Ns::net("test").await.unwrap();
-        ns.spawn(async {
-            let nl = Netlink::connect().unwrap();
-            let (idx_a, idx_b) = nl.veth_create_pair("veth", "peer").await.unwrap();
-            let lookup_a = nl.link_get_index("veth").await.unwrap();
-            let lookup_b = nl.link_get_index("peer").await.unwrap();
-            assert_eq!(idx_a, lookup_a, "veth index must match lookup");
-            assert_eq!(idx_b, lookup_b, "peer index must match lookup");
-            Ok::<_, anyhow::Error>(())
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    }
-
-    #[tokio::test]
     async fn veth_create_pair_returns_distinct_indices() {
         let ns = Ns::net("test").await.unwrap();
         let (a, b) = ns
             .spawn(async {
                 let nl = Netlink::connect().unwrap();
-                nl.veth_create_pair("a", "b").await.unwrap()
+                nl.veth_create_pair("a", "b").await.unwrap();
+                let idx_a = nl.link_get_index("a").await.unwrap();
+                let idx_b = nl.link_get_index("b").await.unwrap();
+                (idx_a, idx_b)
             })
             .await
             .unwrap();
@@ -304,12 +267,12 @@ mod tests {
         let ns_src = Ns::net("src").await.unwrap();
         let ns_dst = Ns::net("dst").await.unwrap();
 
-        let dest_pid = ns_dst.pid();
+        let dst_pid = ns_dst.pid();
         ns_src
             .spawn(async move {
                 let nl = Netlink::connect().unwrap();
-                let (idx, _) = nl.veth_create_pair("a", "b").await.unwrap();
-                nl.veth_set_ns(idx, dest_pid).await.unwrap();
+                nl.veth_create_pair("a", "b").await.unwrap();
+                nl.veth_set_ns("a", dst_pid).await.unwrap();
                 let err = nl.link_get_index("a").await;
                 assert!(err.is_err(), "moved link must not be found in source ns");
                 Ok::<_, anyhow::Error>(())
