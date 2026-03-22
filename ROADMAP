@@ -1,0 +1,66 @@
+V1:
+
+- Instead of erezd, should we run both encapd
+  and decapd, for separation of binaries
+  during release?
+- If sitelocals are run on /32s, then all metal
+  to metal traffic is pinned through the router
+  instead of solely being routed in L2, is this
+  ok?
+- Out of order delivery if a packet takes
+  multiple paths, is that a problem?
+- Do we want to support the ingress + egress
+  indexes being the same when forwarding, or is
+  it a safety check we perform to avoid this
+
+V2:
+
+- Emit metrics, both from userspace and from
+  eBPF maps. These should be fed into
+  VictoriaMetrics
+- A program's common options should also specify,
+  (1) the version string, (2) whether the options
+  are "initialised", (3) the iface the program is
+  attached to
+- Reconcile the RIB with the FIB, instead of only
+  applying RIB updates and not diffing against
+  the existing FIB state, this will require a
+  blocking executor so we don't stargve Tokio
+  threads
+- Re-use maps on startup instead of clearing them
+  out and creating new maps. To do this, we need
+  to make sure we avoid re-using maps if the data
+  sizes are incompatible
+- Statically assert eBPF map sizes/other constants
+  during compilation
+- Ratelimit eBPF log tailing based on some
+  configurable quota
+- Attach erez_encap via the TCX datapath instead
+  of using TC + qdiscs
+- How to route across the backbone, do I do a
+  custom implementation of MPLS?
+- Collect BIRD and erezd logs from stderr and
+  feed them into VictoriaLogs. We should emit wide
+  events for the daemon
+- Inject arbitrary latency into links, or affect
+  their up/down state to simulate failure recovery
+  during tests
+- Decap should only act on packets which are
+  destined for one of the router's next hops
+- Encap/Decap should only act on packets if the
+  userspace counter is constantly incremented
+- Use distinct error values to indicate different
+  types of errors, i.e. TTL too low vs. failed to
+  read packet, errors for short reads?
+- Liveness probes for each nextop, i.e. healthcheck
+  that we can send probes and receive them back, if
+  we can't then we stop using a nexthop
+- Unit, integration, and E2E tests. We want to be
+  able to trace the packet path through a topology
+- Load balance against nexthops based on health, so
+  we avoid sending traffic through nexthops which
+  are full (bandwidth)/unhealthy/expensive etc.
+- Parse the BIRD control protocol instead of parsing the
+  stdout output
+- Set up automatic clang formatting for C code in
+  the codebase

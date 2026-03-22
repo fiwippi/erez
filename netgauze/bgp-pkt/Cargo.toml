@@ -1,0 +1,59 @@
+[package]
+name = "netgauze-bgp-pkt"
+version = "0.8.0"
+edition = "2021"
+authors = ["Ahmed Elhassany <a.hassany@gmail.com>"]
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/NetGauze/NetGauze"
+homepage = "https://github.com/NetGauze/NetGauze"
+description = """
+BGP-4 Protocol representation and serde.
+"""
+keywords = ["bgp", "parser", "protocol"]
+categories = ["network-programming", "parsing"]
+
+[dependencies]
+netgauze-iana = { path = "../iana" }
+netgauze-locate = { path = "../locate", optional = true }
+netgauze-parse-utils = { path = "../parse-utils", optional = true }
+netgauze-serde-macros = { path = "../serde-macros", optional = true }
+ipnet = { version = "2.11", features = ["serde"] }
+strum = "0.27"
+strum_macros = "0.27"
+serde = { version = "1.0", features = ["derive"] }
+nom = { version = "7.1", optional = true }
+byteorder = { version = "1.5", optional = true }
+criterion = { version = "0.7", optional = true }                        # Dev dep for bench
+arbitrary = { version = "1", optional = true }
+arbitrary_ext = { version = "0.3", optional = true }
+log = { version = "0.4", optional = true }
+tokio-util = { version = "0.7", features = ["codec"], optional = true }
+bytes = { version = "1.10", optional = true }
+
+[features]
+default = ["serde"]
+serde = [
+    "nom",
+    "byteorder",
+    "netgauze-locate",
+    "netgauze-parse-utils",
+    "netgauze-serde-macros",
+]
+codec = ["log", "tokio-util", "bytes"]
+bench = ["criterion"]
+fuzz = ["arbitrary", "arbitrary_ext"]
+
+# Dev-dependencies removed -- these are only needed for running
+# netgauze's own tests, not for using bgp-pkt as a dependency.
+# [dev-dependencies]
+# netgauze-pcap-reader = { version = "0.8.0", path = "../pcap-reader" }
+# netgauze-parse-utils = { path = "../parse-utils", features = ["test-helpers"] }
+# serde_json = "1"
+# rstest = "0.26"
+# pcap-parser = { version = "0.17", features = ["data"] }
+
+[[bench]]
+name = "serde_benchmark"
+harness = false
+required-features = ["bench"]

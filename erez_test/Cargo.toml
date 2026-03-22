@@ -1,0 +1,30 @@
+[package]
+name = "erez_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+askama.workspace = true
+clap.workspace = true
+futures.workspace = true
+ipnet.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["sched", "mount", "net", "fs", "user", "process", "term"] }
+rand.workspace = true
+netlink-packet-route.workspace = true
+reedline = "0.46.0"
+rtnetlink.workspace = true
+shlex = "1.3.0"
+tokio = { workspace = true, features = ["net", "sync", "time", "process", "io-util", "rt", "fs"] }
+
+[dev-dependencies]
+erezd = { path = "../erezd" }
+erez_lib.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

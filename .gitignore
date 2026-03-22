@@ -1,0 +1,8 @@
+# Darwin
+.DS_Store
+
+# Rust/eBPF
+/target
+erezd/src/bpf/erez.skel.rs
+erezd/src/bpf/vmlinux.h
+

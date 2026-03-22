@@ -1,0 +1,9 @@
+This project is dual-licensed:
+
+- All files except erezd/src/bpf/erez.bpf.c are licensed under the
+  GNU Affero General Public License v3.0 or later. See LICENSE.AGPL
+  for the full license text.
+
+- erezd/src/bpf/erez.bpf.c is licensed under the GNU General Public
+  License v2.0 only, as required for access to GPL-restricted kernel
+  BPF helpers. See LICENSE.GPL for the full license text.

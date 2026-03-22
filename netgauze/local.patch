@@ -1,0 +1,80 @@
+diff --git a/crates/bgp-pkt/src/wire/deserializer/path_attribute/path_attribute.rs b/crates/bgp-pkt/src/wire/deserializer/path_attribute/path_attribute.rs
+index 985332a..3c9fe99 100644
+--- a/crates/bgp-pkt/src/wire/deserializer/path_attribute/path_attribute.rs
++++ b/crates/bgp-pkt/src/wire/deserializer/path_attribute/path_attribute.rs
+@@ -718,7 +718,7 @@ impl<'a>
+                 let (mp_buf, (next_hop, next_hop_local)) =
+                     parse_ip4_or_ipv6_next_hop(mp_buf, addr_type)?;
+                 let (mp_buf, _) = be_u8(mp_buf)?;
+-                let add_path = add_path_map.get(&addr_type).is_some_and(|x| *x);
++                let add_path = true;
+                 let (_, nlri) = parse_till_empty_into_with_one_input_located(mp_buf, add_path)?;
+                 Ok((
+                     buf,
+@@ -787,7 +787,7 @@ impl<'a>
+                     (mp_buf, None)
+                 };
+                 let (mp_buf, _) = be_u8(mp_buf)?;
+-                let add_path = add_path_map.get(&addr_type).is_some_and(|x| *x);
++                let add_path = true; // Not recognised correctly by library, so we force it
+                 let (_, nlri) = parse_till_empty_into_with_one_input_located(mp_buf, add_path)?;
+                 Ok((
+                     buf,
+@@ -1060,7 +1060,7 @@ impl<'a>
+             nom::combinator::map_res(be_u8, SubsequentAddressFamily::try_from)(mp_buf)?;
+         match AddressType::from_afi_safi(afi, safi) {
+             Ok(addr_type @ AddressType::Ipv4Unicast) => {
+-                let add_path = add_path_map.get(&addr_type).is_some_and(|x| *x);
++                let add_path = true;
+                 let (_, nlri) = parse_till_empty_into_with_one_input_located(mp_buf, add_path)?;
+                 Ok((buf, MpUnreach::Ipv4Unicast { nlri }))
+             }
+diff --git a/crates/bgp-pkt/src/wire/deserializer/update.rs b/crates/bgp-pkt/src/wire/deserializer/update.rs
+index 1085fd0..e76f644 100644
+--- a/crates/bgp-pkt/src/wire/deserializer/update.rs
++++ b/crates/bgp-pkt/src/wire/deserializer/update.rs
+@@ -153,10 +153,7 @@ impl<'a>
+         buf: Span<'a>,
+         ctx: &mut BgpParsingContext,
+     ) -> IResult<Span<'a>, Self, LocatedBgpUpdateMessageParsingError<'a>> {
+-        let add_path = ctx
+-            .add_path
+-            .get(&AddressType::Ipv4Unicast)
+-            .is_some_and(|x| *x);
++        let add_path = true; // Not recognised correctly by library, so we force it
+         let (buf, withdrawn_buf) = nom::multi::length_data(be_u16)(buf)?;
+         let (_, withdrawn_routes) = parse_nlri(withdrawn_buf, add_path, false, ctx)?;
+         let (buf, mut path_attributes_buf) = nom::multi::length_data(be_u16)(buf)?;
+diff --git a/crates/bgp-pkt/src/wire/serializer/capabilities.rs b/crates/bgp-pkt/src/wire/serializer/capabilities.rs
+index d14818e..8a12c6f 100644
+--- a/crates/bgp-pkt/src/wire/serializer/capabilities.rs
++++ b/crates/bgp-pkt/src/wire/serializer/capabilities.rs
+@@ -259,11 +259,10 @@ impl WritablePdu<AddPathCapabilityWritingError> for AddPathAddressFamily {
+     fn write<T: Write>(&self, writer: &mut T) -> Result<(), AddPathCapabilityWritingError> {
+         writer.write_u16::<NetworkEndian>(self.address_type().address_family().into())?;
+         writer.write_u8(self.address_type().subsequent_address_family().into())?;
+-        // Flip second bit if send is enabled
+-        let send = u8::from(self.send()) * 2;
+-        // Flip first bit if send is enabled
+-        let receive = u8::from(self.receive());
+-        writer.write_u8(send | receive)?;
++
++        // This doesn't seem to be serialised correctly so
++        // we force it to be send = false, receive = true
++        writer.write_u8(1)?;
+         Ok(())
+     }
+ }
+diff --git a/crates/bgp-speaker/src/connection.rs b/crates/bgp-speaker/src/connection.rs
+index 70208ff..4fcf7a2 100644
+--- a/crates/bgp-speaker/src/connection.rs
++++ b/crates/bgp-speaker/src/connection.rs
+@@ -1281,7 +1281,7 @@ fn handle_update_message<A>(
+     let mut bgp_mp_reach_count = 0;
+     let mut bgp_mp_unreach_count = 0;
+     for attr in update.path_attributes() {
+-        if has_origin && has_asn_path {
++        if has_origin && has_asn_path && has_next_hop {
+             break;
+         }
+         if let PathAttributeValue::Origin(_) = attr.value() {

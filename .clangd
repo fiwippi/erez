@@ -1,0 +1,13 @@
+# If the LSP is failing to process a file, you can
+# run a manual check to show the errors, i.e. run
+# `clangd --check=erezd/src/bpf/erez.bpf.c`.
+
+# If we specify an empty compile_flags.txt in the root
+# of the repository, the -I flags are resolved relative
+# to the root as well.
+CompileFlags:
+  # Keep target and headers in sync with erezd/build.rs.
+  Add: [
+    "-target", "bpf",
+    -I/usr/include/aarch64-linux-gnu,
+    ]
