@@ -34,8 +34,8 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct Director {
-    /// Director receives BGP updates from a BGP speaker on
+pub struct Reconciler {
+    /// Reconciler receives BGP updates from a BGP speaker on
     /// this channel, it populates the eBPF map using these
     /// updates.
     updates_rx: Receiver<bgp::Update>,
@@ -44,7 +44,7 @@ pub struct Director {
     token: CancellationToken,
 }
 
-impl Director {
+impl Reconciler {
     pub fn new(updates_rx: Receiver<bgp::Update>, token: CancellationToken) -> Result<Self> {
         Ok(Self { updates_rx, token })
     }
@@ -57,7 +57,10 @@ impl Director {
             tokio::select! {
                 () = self.token.cancelled() => break,
                 update = self.updates_rx.recv() => {
-                    let Some(update) = update else { continue };
+                    let Some(update) = update else {
+                        info!("BGP channel closed, shutting down");
+                        break;
+                    };
 
                     // Update the RIB with the routes we learnt from the update.
                     for announcement in &update.announcements {
@@ -76,7 +79,7 @@ impl Director {
             }
         }
 
-        info!("Director finished running");
+        info!("Reconciler finished running");
         Ok(())
     }
 }
