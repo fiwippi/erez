@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use snafu::{ResultExt, Snafu};
+use snafu::{Report, ResultExt, Snafu};
 
 use erezd::{
     bgp,
@@ -11,8 +11,9 @@ use erezd::{
     interface::{self, Interface},
     telemetry,
 };
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{info, warn};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -91,7 +92,6 @@ async fn main() -> Result<()> {
             info!(?config, "Loaded config");
 
             let token = CancellationToken::new();
-            let tracker = TaskTracker::new();
 
             let (speaker, bgp_updates_rx) = bgp::Speaker::new(config.bgp, token.clone())
                 .whatever_context::<_, Error>("Failed to create BGP speaker")?;
@@ -100,18 +100,18 @@ async fn main() -> Result<()> {
             )?;
             bpf::attach_erez_encap(&iface, &config.telemetry.level)
                 .whatever_context::<_, Error>("Failed to attach erez_encap")?;
-            let director = director::Director::new(bgp_updates_rx, iface.clone(), token.clone())
+            let director = director::Director::new(bgp_updates_rx, token.clone())
                 .whatever_context::<_, Error>("Failed to create Director")?;
 
-            tracker.spawn(speaker.run());
-            tracker.spawn(director.run());
-            tracker.spawn_blocking({
-                let iface = iface.clone();
+            let mut join_set: JoinSet<Result<()>> = JoinSet::new();
+            join_set.spawn(async move { speaker.run().await.map_err(Error::from) });
+            join_set.spawn(async move { director.run().await.map_err(Error::from) });
+            join_set.spawn_blocking({
                 let token = token.clone();
-                move || bpf::tail_erez_encap_logs(&iface, &token)
+                move || bpf::tail_erez_encap_logs(&token).map_err(Error::from)
             });
 
-            graceful_shutdown(&iface, tracker, token).await?;
+            graceful_shutdown(&iface, join_set, token).await?;
         }
         Commands::Decap { config } => {
             let config = DecapConfig::load(&config).await?;
@@ -119,7 +119,6 @@ async fn main() -> Result<()> {
             info!(?config, "Loaded config");
 
             let token = CancellationToken::new();
-            let tracker = TaskTracker::new();
 
             let iface = Interface::lookup(&config.ebpf.interface).whatever_context::<_, Error>(
                 format!("Failed to lookup interface: {}", config.ebpf.interface),
@@ -127,13 +126,13 @@ async fn main() -> Result<()> {
             bpf::attach_erez_decap(&iface, &config.telemetry.level)
                 .whatever_context::<_, Error>("Failed to attach erez_decap")?;
 
-            tracker.spawn_blocking({
-                let iface = iface.clone();
+            let mut join_set: JoinSet<Result<()>> = JoinSet::new();
+            join_set.spawn_blocking({
                 let token = token.clone();
-                move || bpf::tail_erez_encap_logs(&iface, &token)
+                move || bpf::tail_erez_decap_logs(&token).map_err(Error::from)
             });
 
-            graceful_shutdown(&iface, tracker, token).await?;
+            graceful_shutdown(&iface, join_set, token).await?;
         }
     }
 
@@ -142,20 +141,27 @@ async fn main() -> Result<()> {
 
 async fn graceful_shutdown(
     iface: &Interface,
-    tracker: TaskTracker,
+    mut join_set: JoinSet<Result<()>>,
     token: CancellationToken,
 ) -> Result<()> {
-    erez_lib::signal::shutdown_signal().await;
-    info!("Shutting down");
+    tokio::select! {
+        _ = erez_lib::signal::shutdown_signal() => {
+            info!("Received signal, shutting down");
+        }
+        Some(result) = join_set.join_next() => {
+            if let Ok(Err(e)) = result {
+                error!(error = %Report::from_error(&e), "Task failed, shutting down");
+            }
+        }
+    }
 
     bpf::detach(iface).whatever_context::<_, Error>("Failed to detach Erez programs")?;
     info!("Detached Erez programs");
 
     token.cancel();
-    tracker.close();
     info!("Draining tasks");
     tokio::select! {
-        () = tracker.wait() => {
+        _ = join_set.join_all() => {
             info!("All tasks finished");
         }
         () = tokio::time::sleep(Duration::from_secs(30)) => {

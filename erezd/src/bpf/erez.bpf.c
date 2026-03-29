@@ -95,7 +95,7 @@ struct e_fib {
 	__type(value, struct fib_entry_t);
   // This flag must be set: https://docs.kernel.org/bpf/map_lpm_trie.html.
   __uint(map_flags, BPF_F_NO_PREALLOC);
- 	__uint(max_entries, 1024); 
+ 	__uint(max_entries, 1024);
 } e_fib SEC(".maps") ;
 
 static __s64 __always_inline skb_extract_l4_proto(struct __sk_buff *skb, __u32 l3_proto, __u8 *l4_proto) {

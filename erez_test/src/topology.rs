@@ -310,12 +310,17 @@ pub struct Edge {
     pub interface: RouterInterface,
 }
 
+/// The IPv6 link-local subnet.
+static LINK_LOCAL_V6: std::sync::LazyLock<IpNet> =
+    std::sync::LazyLock::new(|| "fe80::/10".parse().unwrap());
+
 impl Router<Edge> {
     pub async fn new(
         name: &str,
         asn: u32,
         v4_subnet: Ipv4Net,
         v6_subnet: Ipv6Net,
+        extra_ports: &[(&str, u16)],
     ) -> anyhow::Result<Router<Edge>> {
         let ns = Ns::net(name).await?;
         let bridge = Bridge::new(ns.clone()).await?;
@@ -326,11 +331,22 @@ impl Router<Edge> {
 
         // Accept any BGP peers from link-local addresses on the bridge.
         bird.add_peer(
-            Peer::new("metal", "fe80::/10".parse::<IpNet>().unwrap(), asn)
+            Peer::new("metal_bird", *LINK_LOCAL_V6, asn)
                 .interface(bridge.name.clone())
                 .add_paths_tx(true),
         )
         .await?;
+        // Accept additional BGP peers on non-standard ports, e.g. for
+        // non-BIRD daemons that cannot use port 179 on the same host.
+        for &(name, port) in extra_ports {
+            bird.add_peer(
+                Peer::new(format!("metal_{name}"), *LINK_LOCAL_V6, asn)
+                    .interface(bridge.name.clone())
+                    .add_paths_tx(true)
+                    .port(port),
+            )
+            .await?;
+        }
 
         // Skip the first IPv6 host, so that the numbering
         // begins at 1, making it consistent with IPv4.

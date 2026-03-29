@@ -1,21 +1,18 @@
 use std::{
-    ffi::c_void,
-    mem::MaybeUninit,
-    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
-    str::FromStr,
+    collections::HashMap, mem::MaybeUninit, os::fd::AsFd, path::Path, str::FromStr, sync::LazyLock,
     time::Duration,
 };
 
 use libbpf_rs::{
-    MapCore, MapFlags, MapHandle, PrintLevel, RingBufferBuilder, TC_EGRESS, TcHookBuilder, Xdp,
-    XdpFlags,
+    MapCore, MapFlags, MapHandle, OpenObject, PrintLevel, RingBufferBuilder, TC_EGRESS,
+    TcHookBuilder, Xdp, XdpFlags,
     libbpf_sys::{self},
     skel::{OpenSkel, SkelBuilder},
 };
 use nix::errno::Errno;
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 
 #[rustfmt::skip]
 mod erez_bpf {
@@ -35,23 +32,16 @@ const TC_HANDLE: u32 = 1;
 /// eBPF TC priority value for Erez programs.
 const TC_PRIORITY: u32 = 1;
 
-/// Name of a mapping from NLRIs to nexthop
-/// IDs sent through by the router.
-const MAP_E_FIB: &str = "e_fib";
-/// Name of a map holding erez_encap program
-/// options.
-const MAP_E_ENCAP_OPTS: &str = "e_encap_opts";
-/// Name of a map holding erez_decap program
-/// options.
-const MAP_E_DECAP_OPTS: &str = "e_decap_opts";
-/// Name of a mapping that is used for sending
-/// logs from Erez eBPF programs to user space.
-const MAP_E_LOGS: &str = "e_logs";
-
 /// Name of the erez_encap eBPF program.
 pub const PROG_EREZ_ENCAP: &str = "erez_encap";
 /// Name of the erez_decap eBPF program.
 pub const PROG_EREZ_DECAP: &str = "erez_decap";
+
+/// Root path in the BPF filesystem where Erez maps are pinned.
+pub const PIN_ROOT: &str = "/sys/fs/bpf/erez";
+/// Pin path in the BPF filesystem for the e_fib map which maps
+/// NLRIs to nexthop IDs sent through by the router.
+pub static PIN_MAP_E_FIB: LazyLock<String> = LazyLock::new(|| format!("{PIN_ROOT}/e_fib"));
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -71,6 +61,11 @@ pub enum Error {
     Libbpf {
         message: String,
         source: libbpf_rs::Error,
+    },
+    #[snafu(display("{message}: {inner:?}"))]
+    Plain {
+        message: String,
+        inner: plain::Error,
     },
     #[snafu(whatever, display("{message}"))]
     Whatever {
@@ -126,7 +121,7 @@ const NOISY_LIBBPF_MESSAGES: [&str; 1] =
 fn print_callback(level: PrintLevel, message: String) {
     let message = message.trim();
     if NOISY_LIBBPF_MESSAGES.contains(&message) {
-        debug!("{message}");
+        trace!("{message}");
         return;
     }
 
@@ -139,22 +134,28 @@ fn print_callback(level: PrintLevel, message: String) {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub enum ProgramType {
-    Xdp,
-    Tc,
-}
-
-fn attach(prog: &str, iface: &Interface, log_level: &str) -> Result<COpts> {
+fn load_skel(open_object: &mut MaybeUninit<OpenObject>) -> Result<ErezSkel> {
     let skel_builder = ErezSkelBuilder::default();
-    let mut open_object = MaybeUninit::uninit();
-    let open_skel = skel_builder.open(&mut open_object).context(LibbpfSnafu {
-        message: "Failed to open eBPF object",
+    let open_skel = skel_builder.open(open_object).context(LibbpfSnafu {
+        message: "Failed to open eBPF skeleton",
     })?;
     let skel = open_skel.load().context(LibbpfSnafu {
-        message: "Failed to load eBPF object",
+        message: "Failed to load eBPF skeleton",
     })?;
+    Ok(skel)
+}
 
+fn attach(prog: &str, iface: &Interface, log_level: &str) -> Result<()> {
+    // Initialise the skeleton.
+    let mut open_object = MaybeUninit::uninit();
+    let mut skel = load_skel(&mut open_object)?;
+
+    // Compute program options.
+    let log_level = CLogLevel::from_str(log_level)?;
+    let opts = COpts { log_level };
+    let opts_bytes: [u8; COpts::SIZE] = (&opts).into();
+
+    // Attach programs.
     match prog {
         PROG_EREZ_ENCAP => {
             // Attach the program to the network interface on egress.
@@ -171,6 +172,23 @@ fn attach(prog: &str, iface: &Interface, log_level: &str) -> Result<COpts> {
             egress_hook.attach().context(LibbpfSnafu {
                 message: format!("Failed to attach TC hook to interface {}", iface.name),
             })?;
+            skel.maps
+                .e_encap_opts
+                .update(&0u32.to_le_bytes(), &opts_bytes, MapFlags::empty())
+                .whatever_context::<_, Error>("Failed to set erez_encap program options")?;
+
+            // We need to ensure the root directory
+            // exists before we pin to it.
+            std::fs::create_dir_all(PIN_ROOT)
+                .whatever_context::<_, Error>("Failed to create BPF_PIN_ROOT directory")?;
+            if !Path::new(&*PIN_MAP_E_FIB).exists() {
+                skel.maps
+                    .e_fib
+                    .pin(&*PIN_MAP_E_FIB)
+                    .with_context(|_| LibbpfSnafu {
+                        message: "Failed to pin e_fib map",
+                    })?;
+            }
         }
         PROG_EREZ_DECAP => {
             // Attach the program to the network interface on ingress.
@@ -179,35 +197,24 @@ fn attach(prog: &str, iface: &Interface, log_level: &str) -> Result<COpts> {
                 .context(LibbpfSnafu {
                     message: format!("Failed to attach XDP program to interface {}", iface.name),
                 })?;
+            skel.maps
+                .e_decap_opts
+                .update(&0u32.to_le_bytes(), &opts_bytes, MapFlags::empty())
+                .whatever_context::<_, Error>("Failed to set erez_decap program options")?;
         }
         _ => snafu::whatever!("Invalid program: {prog}"),
     }
 
-    // Set program options.
-    let log_level = CLogLevel::from_str(log_level)?;
-    let opts = COpts { log_level };
-    Ok(opts)
+    Ok(())
 }
 
 pub fn attach_erez_encap(iface: &Interface, log_level: &str) -> Result<()> {
-    let opts = attach(PROG_EREZ_ENCAP, iface, log_level)?;
-    let opts_bytes: [u8; COpts::SIZE] = (&opts).into();
-
-    let maps = query_maps(iface, ProgramType::Tc)?;
-    let map = find_map_handle(&maps, MAP_E_ENCAP_OPTS)?;
-    map.update(&0u32.to_le_bytes(), &opts_bytes, MapFlags::empty())
-        .whatever_context::<_, Error>("Failed to set erez_encap program options")?;
+    attach(PROG_EREZ_ENCAP, iface, log_level)?;
     Ok(())
 }
 
 pub fn attach_erez_decap(iface: &Interface, log_level: &str) -> Result<()> {
-    let opts = attach(PROG_EREZ_DECAP, iface, log_level)?;
-    let opts_bytes: [u8; COpts::SIZE] = (&opts).into();
-
-    let maps = query_maps(iface, ProgramType::Xdp)?;
-    let map = find_map_handle(&maps, MAP_E_DECAP_OPTS)?;
-    map.update(&0u32.to_le_bytes(), &opts_bytes, MapFlags::empty())
-        .whatever_context::<_, Error>("Failed to set erez_decap program options")?;
+    attach(PROG_EREZ_DECAP, iface, log_level)?;
     Ok(())
 }
 
@@ -285,24 +292,21 @@ fn detach_xdp(iface: &Interface) -> Result<()> {
     }
 }
 
-pub fn tail_erez_encap_logs(iface: &Interface, token: &CancellationToken) -> Result<()> {
-    tail_logs(iface, ProgramType::Tc, PROG_EREZ_ENCAP, token)
+pub fn tail_erez_encap_logs(token: &CancellationToken) -> Result<()> {
+    tail_logs(PROG_EREZ_ENCAP, token)
 }
 
-pub fn tail_erez_decap_logs(iface: &Interface, token: &CancellationToken) -> Result<()> {
-    tail_logs(iface, ProgramType::Xdp, PROG_EREZ_DECAP, token)
+pub fn tail_erez_decap_logs(token: &CancellationToken) -> Result<()> {
+    tail_logs(PROG_EREZ_DECAP, token)
 }
 
 /// Consume log events from a libbpf_rs::RingBuffer that are produced
 /// by Erez programs in the current network namespace.
-fn tail_logs(
-    iface: &Interface,
-    prog_type: ProgramType,
-    prog_name: &str,
-    token: &CancellationToken,
-) -> Result<()> {
-    let maps = query_maps(iface, prog_type)?;
-    let map = find_map_handle(&maps, MAP_E_LOGS)?;
+fn tail_logs(prog_name: &str, token: &CancellationToken) -> Result<()> {
+    // Initialise the skeleton.
+    let mut open_object = MaybeUninit::uninit();
+    let skel = load_skel(&mut open_object)?;
+    let map = &skel.maps.e_logs;
 
     // This channel is used to funnel logs from the eBPF side.
     let (tx, mut rx) = unbounded_channel::<CLogEvent>();
@@ -352,127 +356,73 @@ fn tail_logs(
     Ok(())
 }
 
-fn query_prog_id(iface: &Interface, prog_type: ProgramType) -> Result<u32> {
-    match prog_type {
-        ProgramType::Tc => {
-            // We can't use libbpf_rs::ProgInfoIter because it doesn't
-            // return a valid interface index, so we can't filter on
-            // the correct interface, instead we use a TC helper.
-            let (hook, mut opts) = reconstruct_tc_hook(iface);
-            let ret = unsafe { libbpf_sys::bpf_tc_query(&raw const hook, &raw mut opts) };
-            if ret != 0 {
-                return Err(Error::from_c_int_for_iface("bpf_tc_query", iface, ret));
+pub type FibState = HashMap<CNlri, CFibEntry>;
+
+pub struct Fib(MapHandle);
+
+impl Fib {
+    pub fn open() -> Result<Fib> {
+        MapHandle::from_pinned_path(&*PIN_MAP_E_FIB)
+            .map(Fib)
+            .with_context(|_| LibbpfSnafu {
+                message: "Failed to open pinned e_fib map",
+            })
+    }
+
+    pub fn reconcile(&self, desired: FibState) -> Result<()> {
+        let actual = self.read()?;
+        for (nlri, entry) in &desired {
+            if actual.get(nlri) != Some(entry) {
+                self.insert(*nlri, entry.clone())?;
             }
-            Ok(opts.prog_id)
         }
-        ProgramType::Xdp => {
-            let flags = XdpFlags::empty().bits() as i32;
-            let mut opts = libbpf_sys::bpf_xdp_query_opts {
-                sz: size_of::<libbpf_sys::bpf_xdp_query_opts>() as libbpf_sys::size_t,
-                ..libbpf_sys::bpf_xdp_query_opts::default()
-            };
-            let ret: i32 =
-                unsafe { libbpf_sys::bpf_xdp_query(iface.index.get(), flags, &raw mut opts) };
-            if ret != 0 {
-                return Err(Error::from_c_int_for_iface("bpf_xdp_query", iface, ret));
+        for nlri in actual.keys() {
+            if !desired.contains_key(nlri) {
+                self.delete(*nlri)?;
             }
-            Ok(opts.prog_id)
         }
-    }
-}
-
-fn get_prog_fd(id: u32) -> Result<OwnedFd> {
-    match libbpf_rs::Program::fd_from_id(id) {
-        Ok(fd) => Ok(fd),
-        Err(e) => Err(Error::Libbpf {
-            message: format!("Failed to get an FD for program with ID {id}"),
-            source: e,
-        }),
-    }
-}
-
-fn get_prog_map_ids(fd: BorrowedFd<'_>) -> Result<Vec<u32>> {
-    // To query the map IDs, we need to know how many exist so
-    // that we can resize our map ID vec to this amount.
-    let mut item = libbpf_sys::bpf_prog_info::default();
-    let item_ptr: *mut libbpf_sys::bpf_prog_info = &raw mut item;
-    let mut len = size_of_val(&item) as u32;
-
-    let ret = unsafe {
-        libbpf_sys::bpf_obj_get_info_by_fd(fd.as_raw_fd(), item_ptr.cast::<c_void>(), &raw mut len)
-    };
-    if ret != 0 {
-        return Err(Error::from_c_int("bpf_obj_get_info_by_id", ret));
+        Ok(())
     }
 
-    // Now we perform the query again, this time, libbpf will take
-    // care to fill in our vec with the map IDs associated with the
-    // program. We take care to zero the rest of the fields so we
-    // don't return info for data we don't care about.
-    let mut map_ids: Vec<u32> = vec![0; item.nr_map_ids as usize];
-    item.map_ids = map_ids.as_mut_ptr().cast::<c_void>() as u64;
-
-    item.xlated_prog_len = 0;
-    item.jited_prog_len = 0;
-    item.nr_line_info = 0;
-    item.nr_func_info = 0;
-    item.nr_jited_line_info = 0;
-    item.nr_jited_func_lens = 0;
-    item.nr_prog_tags = 0;
-    item.nr_jited_ksyms = 0;
-
-    let ret = unsafe {
-        libbpf_sys::bpf_obj_get_info_by_fd(fd.as_raw_fd(), item_ptr.cast::<c_void>(), &raw mut len)
-    };
-    if ret != 0 {
-        return Err(Error::from_c_int("bpf_obj_get_info_by_id", ret));
+    fn read(&self) -> Result<FibState> {
+        self.0
+            .keys()
+            .map(|key_bytes| {
+                let nlri = plain::from_bytes::<CNlri>(&key_bytes).map_err(|e| Error::Plain {
+                    message: "Failed to deserialise CNlri".into(),
+                    inner: e,
+                })?;
+                let value_bytes = self
+                    .0
+                    .lookup(&key_bytes, MapFlags::empty())
+                    .with_context(|_| LibbpfSnafu {
+                        message: "Failed to lookup e_fib entry",
+                    })?
+                    .whatever_context::<_, Error>("Failed to find e_fib entry")?;
+                let fib_entry =
+                    plain::from_bytes::<CFibEntry>(&value_bytes).map_err(|e| Error::Plain {
+                        message: "Failed to deserialise CFibEntry".into(),
+                        inner: e,
+                    })?;
+                Ok((*nlri, fib_entry.clone()))
+            })
+            .collect()
     }
 
-    Ok(map_ids)
-}
-
-pub fn query_maps(iface: &Interface, prog_type: ProgramType) -> Result<Vec<MapHandle>> {
-    let prog_id = query_prog_id(iface, prog_type)?;
-    let prog_fd = get_prog_fd(prog_id)?;
-    let map_ids = get_prog_map_ids(prog_fd.as_fd())?;
-
-    let mut handles = Vec::new();
-    for id in map_ids {
-        let handle = MapHandle::from_map_id(id).whatever_context::<_, Error>(format!(
-            "Failed to create map handle from map ID {id}"
-        ))?;
-        handles.push(handle);
+    fn insert(&self, nlri: CNlri, fib_entry: CFibEntry) -> Result<()> {
+        let nlri_bytes: [u8; CNlri::SIZE] = nlri.into();
+        let fib_entry_bytes: [u8; CFibEntry::SIZE] = fib_entry.into();
+        self.0
+            .update(&nlri_bytes, &fib_entry_bytes, MapFlags::empty())
+            .context(LibbpfSnafu {
+                message: "Failed to update e_fib",
+            })
     }
 
-    Ok(handles)
-}
-
-fn get_map_handle<'a>(maps: &'a [MapHandle], name: &str) -> Option<&'a MapHandle> {
-    maps.iter().find(|m| m.name() == name)
-}
-
-fn find_map_handle<'a>(maps: &'a [MapHandle], name: &str) -> Result<&'a MapHandle> {
-    get_map_handle(maps, name).with_whatever_context(|| format!("Map {name} not found"))
-}
-
-pub fn update_fib_entry(iface: &Interface, nlri: CNlri, fib_entry: CFibEntry) -> Result<()> {
-    let maps = query_maps(iface, ProgramType::Tc)?;
-    let map = find_map_handle(&maps, MAP_E_FIB)?;
-
-    let nlri_bytes: [u8; CNlri::SIZE] = nlri.into();
-    let fib_entry_bytes: [u8; CFibEntry::SIZE] = fib_entry.into();
-    map.update(&nlri_bytes, &fib_entry_bytes, MapFlags::empty())
-        .with_context(|_| LibbpfSnafu {
-            message: "Failed to update e_fib",
+    fn delete(&self, nlri: CNlri) -> Result<()> {
+        let nlri_bytes: [u8; CNlri::SIZE] = nlri.into();
+        self.0.delete(&nlri_bytes).context(LibbpfSnafu {
+            message: "Failed to delete from e_fib",
         })
-}
-
-pub fn delete_fib_entry(iface: &Interface, nlri: CNlri) -> Result<()> {
-    let maps = query_maps(iface, ProgramType::Tc)?;
-    let map = find_map_handle(&maps, MAP_E_FIB)?;
-
-    let nlri_bytes: [u8; CNlri::SIZE] = nlri.into();
-    map.delete(&nlri_bytes).with_context(|_| LibbpfSnafu {
-        message: "Failed to delete from e_fib",
-    })
+    }
 }

@@ -52,6 +52,7 @@ impl fmt::Display for RouteKind {
 
 pub struct Peer {
     pub name: String,
+    pub port: u16,
     pub neighbour: Neighbour,
     pub interface: Option<String>,
     pub remote_as: u32,
@@ -63,6 +64,7 @@ impl Peer {
     pub fn new(name: impl Into<String>, neighbour: impl Into<Neighbour>, remote_as: u32) -> Peer {
         Peer {
             name: name.into(),
+            port: 179,
             neighbour: neighbour.into(),
             remote_as,
             interface: None,
@@ -86,6 +88,12 @@ impl Peer {
     #[must_use]
     pub fn interface(mut self, interface: String) -> Self {
         self.interface = Some(interface);
+        self
+    }
+
+    #[must_use]
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = port;
         self
     }
 }
