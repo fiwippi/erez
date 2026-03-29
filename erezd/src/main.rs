@@ -7,9 +7,8 @@ use erezd::{
     bgp,
     bpf::{self},
     config::{self, DecapConfig, EncapConfig},
-    director,
     interface::{self, Interface},
-    telemetry,
+    reconciler, telemetry,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -33,9 +32,9 @@ pub enum Error {
         source: config::Error,
     },
     #[snafu(transparent)]
-    Director {
+    Reconciler {
         #[snafu(backtrace)]
-        source: director::Error,
+        source: reconciler::Error,
     },
     #[snafu(transparent)]
     Interface {
@@ -100,12 +99,12 @@ async fn main() -> Result<()> {
             )?;
             bpf::attach_erez_encap(&iface, &config.telemetry.level)
                 .whatever_context::<_, Error>("Failed to attach erez_encap")?;
-            let director = director::Director::new(bgp_updates_rx, token.clone())
-                .whatever_context::<_, Error>("Failed to create Director")?;
+            let reconciler = reconciler::Reconciler::new(bgp_updates_rx, token.clone())
+                .whatever_context::<_, Error>("Failed to create Reconciler")?;
 
             let mut join_set: JoinSet<Result<()>> = JoinSet::new();
             join_set.spawn(async move { speaker.run().await.map_err(Error::from) });
-            join_set.spawn(async move { director.run().await.map_err(Error::from) });
+            join_set.spawn(async move { reconciler.run().await.map_err(Error::from) });
             join_set.spawn_blocking({
                 let token = token.clone();
                 move || bpf::tail_erez_encap_logs(&token).map_err(Error::from)
