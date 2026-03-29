@@ -6,9 +6,8 @@ use erez_test::{
 use erezd::config::{BgpConfig, DecapConfig, EbpfConfig, EncapConfig, TelemetryConfig};
 use tokio::net::TcpListener;
 
-const ASN: u32 = 4181;
-
 const EREZD_BIN: &str = concat!(env!("CARGO_TARGET_DIR"), "/debug/erezd");
+const EREZD_BGP_PORT: u16 = 1179;
 
 fn main() -> anyhow::Result<()> {
     if !nix::unistd::Uid::effective().is_root() {
@@ -52,9 +51,10 @@ fn main() -> anyhow::Result<()> {
 async fn run(no_repl: bool) -> anyhow::Result<()> {
     let mut edge = Router::<Edge>::new(
         "edge",
-        ASN,
+        4181,
         "172.16.0.0/24".parse()?,
         "3fff:172:16::/64".parse()?,
+        &[("erezd", EREZD_BGP_PORT)],
     )
     .await?;
     let edge_metal_1 = edge.add_metal("edge_metal_1").await?;
@@ -65,6 +65,7 @@ async fn run(no_repl: bool) -> anyhow::Result<()> {
         64514,
         "10.41.0.0/24".parse()?,
         "3fff:10:41::/64".parse()?,
+        &[],
     )
     .await?;
     let origin_metal = origin_edge.add_metal("origin_metal").await?;
@@ -108,6 +109,7 @@ async fn run(no_repl: bool) -> anyhow::Result<()> {
             &edge_metal_2.ns,
             &edge_metal_2.bird.ns,
             &origin_edge.bird.ns,
+            &origin_metal.ns,
             &origin_metal.bird.ns,
             &transit_a.bird.ns,
             &transit_b.bird.ns,
@@ -120,9 +122,10 @@ async fn run(no_repl: bool) -> anyhow::Result<()> {
 async fn run_erez_encap(metal: &Metal, edge: &Router<Edge>) -> anyhow::Result<NsChild> {
     let config = EncapConfig {
         bgp: BgpConfig {
-            asn: ASN,
+            asn: edge.bird.asn,
             bgp_id: metal.sitelocal_v4.addr(),
             peer_ips: vec![edge.kind.interface.bridge.link_local],
+            port: EREZD_BGP_PORT,
             interface: Some(metal.uplink.clone()),
         },
         ebpf: EbpfConfig {

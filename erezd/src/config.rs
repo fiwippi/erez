@@ -60,12 +60,19 @@ pub struct BgpConfig {
     /// Our BGP ID.
     pub bgp_id: Ipv4Addr,
 
-    /// IPv6 addresses of the peers that
-    /// we establish BGP sessions with.
+    /// IPv6 addresses of the peers that we establish BGP sessions with.
     pub peer_ips: Vec<Ipv6Addr>,
+
+    /// BGP port used for both binding locally and connecting to peers.
+    #[serde(default = "default_bgp_port")]
+    pub port: u16,
 
     /// Network interface name for link-local peer scoping.
     pub interface: Option<String>,
+}
+
+fn default_bgp_port() -> u16 {
+    179
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -79,15 +79,16 @@ impl Speaker {
         let (update_tx, update_rx) = mpsc::channel::<Update>(32);
 
         let peer_ips = config.peer_ips.clone();
+        let port = config.port;
         let iface = config.interface.clone();
-        let mut speaker = Self {
+        let mut speaker = Speaker {
             supervisor: PeersSupervisor::new(config.asn, config.bgp_id),
             config,
             update_tx,
             listener: BgpListener::new(
                 vec![SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::UNSPECIFIED,
-                    179,
+                    port,
                     0,
                     0,
                 ))],
@@ -101,20 +102,19 @@ impl Speaker {
             0
         };
         for ip in peer_ips {
-            speaker.add_peer(SocketAddr::V6(SocketAddrV6::new(ip, 179, 0, scope_id)))?;
+            speaker.add_peer(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope_id)))?;
         }
 
         Ok((speaker, update_rx))
     }
 
-    fn add_peer(&mut self, address: SocketAddr) -> Result<()> {
+    fn add_peer(&mut self, addr: SocketAddr) -> Result<()> {
         let config = PeerConfigBuilder::new()
             .open_delay_timer_duration(5)
             .build();
         // We are parroting the default config value which
         // is itself stored as u16, so no truncation is
         // possible.
-        #[allow(clippy::cast_possible_truncation)]
         let hold_timer_duration = config.hold_timer_duration_large_value().as_secs() as u16;
         let policy = EchoCapabilitiesPolicy::new(
             self.config.asn,
@@ -139,7 +139,7 @@ impl Speaker {
             self.config.asn,
             self.config.asn,
             self.config.bgp_id,
-            address,
+            addr,
             true,
         );
 
@@ -148,20 +148,20 @@ impl Speaker {
         // variant.
         let (peer_states_rx, peer_handle) = self
             .supervisor
-            .create_peer(address.ip(), properties, config, TcpActiveConnect, policy)
+            .create_peer(addr.ip(), properties, config, TcpActiveConnect, policy)
             .map_err(|e| Error::Whatever {
-                message: format!("Failed to create peer: {}", address.ip()),
+                message: format!("Failed to create peer: {}", addr.ip()),
                 source: Some(anyhow::anyhow!("{e:?}")),
                 backtrace: snafu::Backtrace::capture(),
             })?;
         peer_handle
             .start()
-            .whatever_context::<_, Error>(format!("Failed to start peer: {}", address.ip()))?;
-        self.listener.reg_peer(address.ip(), peer_handle);
+            .whatever_context::<_, Error>(format!("Failed to start peer: {}", addr.ip()))?;
+        self.listener.reg_peer(addr.ip(), peer_handle);
 
         tokio::spawn({
             let update_tx = self.update_tx.clone();
-            async move { process_bgp_updates(address.ip(), peer_states_rx, update_tx).await }
+            async move { process_bgp_updates(addr.ip(), peer_states_rx, update_tx).await }
         });
 
         Ok(())

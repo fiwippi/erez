@@ -151,6 +151,7 @@ unsafe impl Plain for COpts {}
 const IPV6_ADDR_SIZE: usize = 16;
 
 #[repr(C)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct CIpv6Addr {
     octets: [u8; IPV6_ADDR_SIZE],
 }
@@ -193,6 +194,7 @@ unsafe impl Plain for CIpv6Addr {}
 
 // Keep this in sync with its C counterpart.
 #[repr(C)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct CNlri {
     prefix_len: u32,
     address: CIpv6Addr,
@@ -234,6 +236,7 @@ const NEXTHOP_MAX_COUNT: usize = 4;
 
 // Keep this in sync with its C counterpart.
 #[repr(C)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct CFibEntry {
     nexthop_count: u8,
     nexthops: [CIpv6Addr; NEXTHOP_MAX_COUNT],
@@ -243,6 +246,12 @@ impl CFibEntry {
     pub const SIZE: usize = mem::size_of::<CFibEntry>();
 
     pub fn new(nexthops: &[&Nexthop]) -> Self {
+        // Currently a FIB entry only accepts at most four nexthops;
+        // it doesn't really matter which nexthops we provide until
+        // we start sorting them for loadbalancing purposes.
+        //
+        // We will want to log/emit a metric to understand how often
+        // this might be happening!
         let nexthop_count = nexthops.len().min(NEXTHOP_MAX_COUNT);
         let nexthops = {
             let mut array: [CIpv6Addr; NEXTHOP_MAX_COUNT] =

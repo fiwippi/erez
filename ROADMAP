@@ -22,15 +22,6 @@ V2:
   (1) the version string, (2) whether the options
   are "initialised", (3) the iface the program is
   attached to
-- Reconcile the RIB with the FIB, instead of only
-  applying RIB updates and not diffing against
-  the existing FIB state, this will require a
-  blocking executor so we don't stargve Tokio
-  threads
-- Re-use maps on startup instead of clearing them
-  out and creating new maps. To do this, we need
-  to make sure we avoid re-using maps if the data
-  sizes are incompatible
 - Statically assert eBPF map sizes/other constants
   during compilation
 - Ratelimit eBPF log tailing based on some
@@ -64,3 +55,7 @@ V2:
   stdout output
 - Set up automatic clang formatting for C code in
   the codebase
+- To style guide, add fact Report::from_error()
+  should be used on all SNAFU error logs
+- Should I configure BIRD as a route reflector for
+  erezd, what difference does that make?

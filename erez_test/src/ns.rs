@@ -411,6 +411,17 @@ fn mount_tmpfs(dirs: &[&str]) -> anyhow::Result<()> {
             None::<&str>,
         )?;
     }
+
+    // Ensure each namespace always has its own private bpffs directory
+    // so that pinned objects are unique to each namespace.
+    nix::mount::mount(
+        Some("bpf"),
+        "/sys/fs/bpf",
+        Some("bpf"),
+        MsFlags::empty(),
+        None::<&str>,
+    )?;
+
     Ok(())
 }
 
