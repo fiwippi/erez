@@ -1298,14 +1298,18 @@ fn handle_update_message<A>(
             bgp_mp_unreach_count += 1;
         }
     }
-    if end_of_rib.is_none() && !has_origin {
+    if end_of_rib.is_none() && !has_origin && (bgp_mp_reach_count > 0 || !update.nlri().is_empty())
+    {
         return Some(ConnectionEvent::UpdateMsgErr(
             UpdateMessageError::MissingWellKnownAttribute {
                 value: vec![PathAttributeType::Origin as u8],
             },
         ));
     }
-    if end_of_rib.is_none() && !has_asn_path {
+    if end_of_rib.is_none()
+        && !has_asn_path
+        && (bgp_mp_reach_count > 0 || !update.nlri().is_empty())
+    {
         return Some(ConnectionEvent::UpdateMsgErr(
             UpdateMessageError::MissingWellKnownAttribute {
                 value: vec![PathAttributeType::AsPath as u8],
