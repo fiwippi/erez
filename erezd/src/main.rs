@@ -92,14 +92,13 @@ async fn main() -> Result<()> {
 
             let token = CancellationToken::new();
 
-            let (speaker, bgp_updates_rx) = bgp::Speaker::new(config.bgp, token.clone())
-                .whatever_context::<_, Error>("Failed to create BGP speaker")?;
+            let mut speaker = bgp::Speaker::new(config.bgp, token.clone());
             let iface = Interface::lookup(&config.ebpf.interface).whatever_context::<_, Error>(
                 format!("Failed to lookup interface: {}", config.ebpf.interface),
             )?;
             bpf::attach_erez_encap(&iface, &config.telemetry.level)
                 .whatever_context::<_, Error>("Failed to attach erez_encap")?;
-            let reconciler = reconciler::Reconciler::new(bgp_updates_rx, token.clone())
+            let reconciler = reconciler::Reconciler::new(speaker.subscribe(), token.clone())
                 .whatever_context::<_, Error>("Failed to create Reconciler")?;
 
             let mut join_set: JoinSet<Result<()>> = JoinSet::new();
