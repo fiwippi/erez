@@ -57,8 +57,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Speaker {
     config: BgpConfig,
 
-    /// Send updates about NLRIs via this channel.
-    update_tx: mpsc::Sender<Update>,
+    /// Send updates about NLRIs to these channels.
+    subscribers: Vec<mpsc::Sender<Update>>,
 
     /// Manages the state of all known peers (including our own).
     supervisor: PeersSupervisor<IpAddr, SocketAddr, TcpStream>,
@@ -72,19 +72,14 @@ pub struct Speaker {
 }
 
 impl Speaker {
-    pub fn new(
-        config: BgpConfig,
-        token: CancellationToken,
-    ) -> Result<(Self, mpsc::Receiver<Update>)> {
-        let (update_tx, update_rx) = mpsc::channel::<Update>(32);
-
-        let peer_ips = config.peer_ips.clone();
+    pub fn new(config: BgpConfig, token: CancellationToken) -> Speaker {
+        let supervisor = PeersSupervisor::new(config.asn, config.bgp_id);
         let port = config.port;
-        let iface = config.interface.clone();
-        let mut speaker = Speaker {
-            supervisor: PeersSupervisor::new(config.asn, config.bgp_id),
+
+        Speaker {
             config,
-            update_tx,
+            supervisor,
+            subscribers: vec![],
             listener: BgpListener::new(
                 vec![SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::UNSPECIFIED,
@@ -95,17 +90,40 @@ impl Speaker {
                 false,
             ),
             token,
-        };
-        let scope_id = if let Some(iface) = iface {
-            Interface::lookup(&iface)?.index.cast_unsigned().get()
+        }
+    }
+
+    // Subscribe to BGP updates.
+    pub fn subscribe(&mut self) -> mpsc::Receiver<Update> {
+        let (tx, rx) = mpsc::channel(32);
+        self.subscribers.push(tx);
+        rx
+    }
+
+    pub async fn run(mut self) -> Result<()> {
+        // Link-local addresses are scoped to an interface, so we need the
+        // interface index to correctly address peers on the same link.
+        let scope_id = if let Some(iface) = &self.config.interface {
+            Interface::lookup(iface)?.index.cast_unsigned().get()
         } else {
             0
         };
+        // Register all the peers so the listener peers with them and
+        // receives BGP updates when we run it.
+        let peer_ips = self.config.peer_ips.clone();
+        let port = self.config.port;
         for ip in peer_ips {
-            speaker.add_peer(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope_id)))?;
+            self.add_peer(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope_id)))?;
         }
 
-        Ok((speaker, update_rx))
+        tokio::select! {
+            () = self.token.cancelled() => {}
+            result = self.listener.run(&mut self.supervisor) => {
+                result.whatever_context::<_, Error>("Failed to run BGP listener")?;
+            }
+        }
+        info!("BGP speaker finished running");
+        Ok(())
     }
 
     fn add_peer(&mut self, addr: SocketAddr) -> Result<()> {
@@ -160,21 +178,10 @@ impl Speaker {
         self.listener.reg_peer(addr.ip(), peer_handle);
 
         tokio::spawn({
-            let update_tx = self.update_tx.clone();
-            async move { process_bgp_updates(addr.ip(), peer_states_rx, update_tx).await }
+            let subscribers = self.subscribers.clone();
+            async move { process_bgp_updates(addr.ip(), peer_states_rx, subscribers).await }
         });
 
-        Ok(())
-    }
-
-    pub async fn run(mut self) -> Result<()> {
-        tokio::select! {
-            () = self.token.cancelled() => {}
-            result = self.listener.run(&mut self.supervisor) => {
-                result.whatever_context::<_, Error>("Failed to run BGP listener")?;
-            }
-        }
-        info!("BGP speaker finished running");
         Ok(())
     }
 }
@@ -185,7 +192,7 @@ pub type Nlri = IpNet;
 
 pub type PathId = Option<u32>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct Route {
     pub path_id: PathId,
     pub nlri: Nlri,
@@ -209,13 +216,13 @@ impl From<&Ipv6UnicastAddress> for Route {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Announcement {
     pub routes: Vec<Route>,
     pub nexthop: Nexthop,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Update {
     // We may have multiple NLRIs announced for different
     // nexthops (due to MP-BGP), but this isn't the case
@@ -335,7 +342,7 @@ async fn process_bgp_updates(
     mut fsm_state_rx: UnboundedReceiver<
         std::result::Result<(FsmState, BgpEvent<SocketAddr>), FsmStateError<SocketAddr>>,
     >,
-    update_tx: mpsc::Sender<Update>,
+    subscribers: Vec<mpsc::Sender<Update>>,
 ) {
     use netgauze_bgp_speaker::events::BgpEvent as E;
     use netgauze_bgp_speaker::fsm::FsmState as S;
@@ -356,13 +363,17 @@ async fn process_bgp_updates(
                     }
                 };
                 debug!(?update, "BGP update");
-                let _ = update_tx.send(update).await;
+                for tx in &subscribers {
+                    let _ = tx.send(update.clone()).await;
+                }
             }
             Ok(event) => {
                 debug!(?event, "BGP event");
             }
             Err(e) => {
-                drop(update_tx);
+                for tx in subscribers {
+                    drop(tx)
+                }
                 error!(error = %e, "FSM failed, handling stopped");
                 return;
             }
