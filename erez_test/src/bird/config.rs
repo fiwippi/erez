@@ -56,6 +56,7 @@ pub struct Peer {
     pub neighbour: Neighbour,
     pub interface: Option<String>,
     pub remote_as: u32,
+    pub next_hop_keep_ebgp: bool,
     pub connect_delay_seconds: Option<u32>,
     pub add_paths_tx: bool,
 }
@@ -70,6 +71,7 @@ impl Peer {
             interface: None,
             connect_delay_seconds: None,
             add_paths_tx: false,
+            next_hop_keep_ebgp: false,
         }
     }
 
@@ -88,6 +90,12 @@ impl Peer {
     #[must_use]
     pub fn interface(mut self, interface: String) -> Self {
         self.interface = Some(interface);
+        self
+    }
+
+    #[must_use]
+    pub fn next_hop_keep_ebgp(mut self, next_hop_keep_ebgp: bool) -> Self {
+        self.next_hop_keep_ebgp = next_hop_keep_ebgp;
         self
     }
 

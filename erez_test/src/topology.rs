@@ -320,7 +320,7 @@ impl Router<Edge> {
         asn: u32,
         v4_subnet: Ipv4Net,
         v6_subnet: Ipv6Net,
-        extra_ports: &[(&str, u16)],
+        rr_clients: &[(&str, u16)],
     ) -> anyhow::Result<Router<Edge>> {
         let ns = Ns::net(name).await?;
         let bridge = Bridge::new(ns.clone()).await?;
@@ -336,13 +336,15 @@ impl Router<Edge> {
                 .add_paths_tx(true),
         )
         .await?;
-        // Accept additional BGP peers on non-standard ports, e.g. for
-        // non-BIRD daemons that cannot use port 179 on the same host.
-        for &(name, port) in extra_ports {
+        // Accept additional BGP peers on non-standard ports. These peers are
+        // treated as route reflector clients: routes are reflected to them
+        // with their original nexthops preserved.
+        for &(name, port) in rr_clients {
             bird.add_peer(
                 Peer::new(format!("metal_{name}"), *LINK_LOCAL_V6, asn)
                     .interface(bridge.name.clone())
                     .add_paths_tx(true)
+                    .next_hop_keep_ebgp(true)
                     .port(port),
             )
             .await?;
