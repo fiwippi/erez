@@ -1,3 +1,4 @@
+use clap::Parser;
 use erez_test::{
     ns::{self, NsChild},
     repl,
@@ -7,7 +8,19 @@ use erezd::config::{BgpConfig, DecapConfig, EbpfConfig, EncapConfig, TelemetryCo
 use tokio::net::TcpListener;
 
 const EREZD_BIN: &str = concat!(env!("CARGO_TARGET_DIR"), "/debug/erezd");
-const EREZD_BGP_PORT: u16 = 1179;
+const EREZD_BGP_PORT: u16 = 1179; // Can't be 179 which is already in use.
+
+#[derive(Debug, Parser)]
+#[command(about, long_about = None)]
+struct Args {
+    /// Log level for erezd processes.
+    #[arg(long, env = "EREZD_LOG", default_value = "INFO")]
+    erezd_log_level: String,
+
+    /// Run without an interactive REPL, waiting for a signal to exit.
+    #[arg(long, env = "NO_REPL")]
+    no_repl: bool,
+}
 
 fn main() -> anyhow::Result<()> {
     if !nix::unistd::Uid::effective().is_root() {
@@ -15,20 +28,19 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let no_repl = std::env::var("NO_REPL").unwrap_or_default() == "1";
-
+    let args = Args::parse();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         ns::cleanup_netns().await?;
 
-        if !no_repl {
+        if !args.no_repl {
             ns::set_stderr_suppressed(true);
             println!("Loading lab...");
         }
 
-        run(no_repl).await?;
+        run(&args).await?;
 
-        if !no_repl {
+        if !args.no_repl {
             println!("Exited REPL!");
         }
 
@@ -48,7 +60,7 @@ fn main() -> anyhow::Result<()> {
 // │           │                               │ ASN 64513 │
 // └───────────┘          172.16.0.0/24        └───────────┘          10.41.0.0/24
 //                      3ffff:172:16::/64                           3ffff:10:41::/64
-async fn run(no_repl: bool) -> anyhow::Result<()> {
+async fn run(args: &Args) -> anyhow::Result<()> {
     let mut edge = Router::<Edge>::new(
         "edge",
         4181,
@@ -77,9 +89,9 @@ async fn run(no_repl: bool) -> anyhow::Result<()> {
         topology::peer(&mut transit, &mut origin_edge).await?;
     }
 
-    let _edge_metal_1_encap = run_erez_encap(&edge_metal_1, &edge).await?;
-    let _edge_metal_2_encap = run_erez_encap(&edge_metal_2, &edge).await?;
-    let _edge_decap = run_erez_decap(&edge).await?;
+    let _edge_metal_1_encap = run_erez_encap(&edge_metal_1, &edge, &args.erezd_log_level).await?;
+    let _edge_metal_2_encap = run_erez_encap(&edge_metal_2, &edge, &args.erezd_log_level).await?;
+    let _edge_decap = run_erez_decap(&edge, &args.erezd_log_level).await?;
 
     // Echo server.
     origin_metal
@@ -99,7 +111,7 @@ async fn run(no_repl: bool) -> anyhow::Result<()> {
         })
         .await??;
 
-    if no_repl {
+    if args.no_repl {
         erez_lib::signal::shutdown_signal().await;
     } else {
         repl::run(&[
@@ -119,7 +131,11 @@ async fn run(no_repl: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_erez_encap(metal: &Metal, edge: &Router<Edge>) -> anyhow::Result<NsChild> {
+async fn run_erez_encap(
+    metal: &Metal,
+    edge: &Router<Edge>,
+    log_level: &str,
+) -> anyhow::Result<NsChild> {
     let config = EncapConfig {
         bgp: BgpConfig {
             asn: edge.bird.asn,
@@ -132,7 +148,7 @@ async fn run_erez_encap(metal: &Metal, edge: &Router<Edge>) -> anyhow::Result<Ns
             interface: metal.uplink.clone(),
         },
         telemetry: TelemetryConfig {
-            level: "DEBUG".into(),
+            level: log_level.to_string(),
         },
     };
     let encap_toml = toml::to_string(&config)?;
@@ -147,13 +163,13 @@ async fn run_erez_encap(metal: &Metal, edge: &Router<Edge>) -> anyhow::Result<Ns
     Ok(encap)
 }
 
-async fn run_erez_decap(edge: &Router<Edge>) -> anyhow::Result<NsChild> {
+async fn run_erez_decap(edge: &Router<Edge>, log_level: &str) -> anyhow::Result<NsChild> {
     let config = DecapConfig {
         ebpf: EbpfConfig {
             interface: edge.kind.interface.bridge.name.clone(),
         },
         telemetry: TelemetryConfig {
-            level: "DEBUG".into(),
+            level: log_level.to_string(),
         },
     };
     let decap_toml = toml::to_string(&config)?;
